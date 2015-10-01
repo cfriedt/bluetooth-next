@@ -265,10 +265,6 @@ ieee802154_set_backoff_exponent(struct wpan_phy *wpan_phy,
 {
 	ASSERT_RTNL();
 
-	if (wpan_dev->min_be == min_be &&
-	    wpan_dev->max_be == max_be)
-		return 0;
-
 	wpan_dev->min_be = min_be;
 	wpan_dev->max_be = max_be;
 	return 0;
@@ -279,9 +275,6 @@ ieee802154_set_short_addr(struct wpan_phy *wpan_phy, struct wpan_dev *wpan_dev,
 			  __le16 short_addr)
 {
 	ASSERT_RTNL();
-
-	if (wpan_dev->short_addr == short_addr)
-		return 0;
 
 	wpan_dev->short_addr = short_addr;
 	return 0;
@@ -307,9 +300,6 @@ ieee802154_set_max_csma_backoffs(struct wpan_phy *wpan_phy,
 {
 	ASSERT_RTNL();
 
-	if (wpan_dev->csma_retries == max_csma_backoffs)
-		return 0;
-
 	wpan_dev->csma_retries = max_csma_backoffs;
 	return 0;
 }
@@ -321,9 +311,6 @@ ieee802154_set_max_frame_retries(struct wpan_phy *wpan_phy,
 {
 	ASSERT_RTNL();
 
-	if (wpan_dev->frame_retries == max_frame_retries)
-		return 0;
-
 	wpan_dev->frame_retries = max_frame_retries;
 	return 0;
 }
@@ -334,12 +321,208 @@ ieee802154_set_lbt_mode(struct wpan_phy *wpan_phy, struct wpan_dev *wpan_dev,
 {
 	ASSERT_RTNL();
 
-	if (wpan_dev->lbt == mode)
-		return 0;
-
 	wpan_dev->lbt = mode;
 	return 0;
 }
+
+static int
+ieee802154_set_ackreq_default(struct wpan_phy *wpan_phy,
+			      struct wpan_dev *wpan_dev, bool ackreq)
+{
+	ASSERT_RTNL();
+
+	wpan_dev->ackreq = ackreq;
+	return 0;
+}
+
+#ifdef CONFIG_IEEE802154_NL802154_EXPERIMENTAL
+static void
+ieee802154_get_llsec_table(struct wpan_phy *wpan_phy,
+			   struct wpan_dev *wpan_dev,
+			   struct ieee802154_llsec_table **table)
+{
+	struct net_device *dev = wpan_dev->netdev;
+	struct ieee802154_sub_if_data *sdata = IEEE802154_DEV_TO_SUB_IF(dev);
+
+	*table = &sdata->sec.table;
+}
+
+static void
+ieee802154_lock_llsec_table(struct wpan_phy *wpan_phy,
+			    struct wpan_dev *wpan_dev)
+{
+	struct net_device *dev = wpan_dev->netdev;
+	struct ieee802154_sub_if_data *sdata = IEEE802154_DEV_TO_SUB_IF(dev);
+
+	mutex_lock(&sdata->sec_mtx);
+}
+
+static void
+ieee802154_unlock_llsec_table(struct wpan_phy *wpan_phy,
+			      struct wpan_dev *wpan_dev)
+{
+	struct net_device *dev = wpan_dev->netdev;
+	struct ieee802154_sub_if_data *sdata = IEEE802154_DEV_TO_SUB_IF(dev);
+
+	mutex_unlock(&sdata->sec_mtx);
+}
+
+static int
+ieee802154_set_llsec_params(struct wpan_phy *wpan_phy,
+			    struct wpan_dev *wpan_dev,
+			    const struct ieee802154_llsec_params *params,
+			    int changed)
+{
+	struct net_device *dev = wpan_dev->netdev;
+	struct ieee802154_sub_if_data *sdata = IEEE802154_DEV_TO_SUB_IF(dev);
+	int res;
+
+	mutex_lock(&sdata->sec_mtx);
+	res = mac802154_llsec_set_params(&sdata->sec, params, changed);
+	mutex_unlock(&sdata->sec_mtx);
+
+	return res;
+}
+
+static int
+ieee802154_get_llsec_params(struct wpan_phy *wpan_phy,
+			    struct wpan_dev *wpan_dev,
+			    struct ieee802154_llsec_params *params)
+{
+	struct net_device *dev = wpan_dev->netdev;
+	struct ieee802154_sub_if_data *sdata = IEEE802154_DEV_TO_SUB_IF(dev);
+	int res;
+
+	mutex_lock(&sdata->sec_mtx);
+	res = mac802154_llsec_get_params(&sdata->sec, params);
+	mutex_unlock(&sdata->sec_mtx);
+
+	return res;
+}
+
+static int
+ieee802154_add_llsec_key(struct wpan_phy *wpan_phy, struct wpan_dev *wpan_dev,
+			 const struct ieee802154_llsec_key_id *id,
+			 const struct ieee802154_llsec_key *key)
+{
+	struct net_device *dev = wpan_dev->netdev;
+	struct ieee802154_sub_if_data *sdata = IEEE802154_DEV_TO_SUB_IF(dev);
+	int res;
+
+	mutex_lock(&sdata->sec_mtx);
+	res = mac802154_llsec_key_add(&sdata->sec, id, key);
+	mutex_unlock(&sdata->sec_mtx);
+
+	return res;
+}
+
+static int
+ieee802154_del_llsec_key(struct wpan_phy *wpan_phy, struct wpan_dev *wpan_dev,
+			 const struct ieee802154_llsec_key_id *id)
+{
+	struct net_device *dev = wpan_dev->netdev;
+	struct ieee802154_sub_if_data *sdata = IEEE802154_DEV_TO_SUB_IF(dev);
+	int res;
+
+	mutex_lock(&sdata->sec_mtx);
+	res = mac802154_llsec_key_del(&sdata->sec, id);
+	mutex_unlock(&sdata->sec_mtx);
+
+	return res;
+}
+
+static int
+ieee802154_add_seclevel(struct wpan_phy *wpan_phy, struct wpan_dev *wpan_dev,
+			const struct ieee802154_llsec_seclevel *sl)
+{
+	struct net_device *dev = wpan_dev->netdev;
+	struct ieee802154_sub_if_data *sdata = IEEE802154_DEV_TO_SUB_IF(dev);
+	int res;
+
+	mutex_lock(&sdata->sec_mtx);
+	res = mac802154_llsec_seclevel_add(&sdata->sec, sl);
+	mutex_unlock(&sdata->sec_mtx);
+
+	return res;
+}
+
+static int
+ieee802154_del_seclevel(struct wpan_phy *wpan_phy, struct wpan_dev *wpan_dev,
+			const struct ieee802154_llsec_seclevel *sl)
+{
+	struct net_device *dev = wpan_dev->netdev;
+	struct ieee802154_sub_if_data *sdata = IEEE802154_DEV_TO_SUB_IF(dev);
+	int res;
+
+	mutex_lock(&sdata->sec_mtx);
+	res = mac802154_llsec_seclevel_del(&sdata->sec, sl);
+	mutex_unlock(&sdata->sec_mtx);
+
+	return res;
+}
+
+static int
+ieee802154_add_device(struct wpan_phy *wpan_phy, struct wpan_dev *wpan_dev,
+		      const struct ieee802154_llsec_device *dev_desc)
+{
+	struct net_device *dev = wpan_dev->netdev;
+	struct ieee802154_sub_if_data *sdata = IEEE802154_DEV_TO_SUB_IF(dev);
+	int res;
+
+	mutex_lock(&sdata->sec_mtx);
+	res = mac802154_llsec_dev_add(&sdata->sec, dev_desc);
+	mutex_unlock(&sdata->sec_mtx);
+
+	return res;
+}
+
+static int
+ieee802154_del_device(struct wpan_phy *wpan_phy, struct wpan_dev *wpan_dev,
+		      __le64 extended_addr)
+{
+	struct net_device *dev = wpan_dev->netdev;
+	struct ieee802154_sub_if_data *sdata = IEEE802154_DEV_TO_SUB_IF(dev);
+	int res;
+
+	mutex_lock(&sdata->sec_mtx);
+	res = mac802154_llsec_dev_del(&sdata->sec, extended_addr);
+	mutex_unlock(&sdata->sec_mtx);
+
+	return res;
+}
+
+static int
+ieee802154_add_devkey(struct wpan_phy *wpan_phy, struct wpan_dev *wpan_dev,
+		      __le64 extended_addr,
+		      const struct ieee802154_llsec_device_key *key)
+{
+	struct net_device *dev = wpan_dev->netdev;
+	struct ieee802154_sub_if_data *sdata = IEEE802154_DEV_TO_SUB_IF(dev);
+	int res;
+
+	mutex_lock(&sdata->sec_mtx);
+	res = mac802154_llsec_devkey_add(&sdata->sec, extended_addr, key);
+	mutex_unlock(&sdata->sec_mtx);
+
+	return res;
+}
+
+static int
+ieee802154_del_devkey(struct wpan_phy *wpan_phy, struct wpan_dev *wpan_dev,
+		      __le64 extended_addr,
+		      const struct ieee802154_llsec_device_key *key)
+{
+	struct net_device *dev = wpan_dev->netdev;
+	struct ieee802154_sub_if_data *sdata = IEEE802154_DEV_TO_SUB_IF(dev);
+	int res;
+
+	mutex_lock(&sdata->sec_mtx);
+	res = mac802154_llsec_devkey_del(&sdata->sec, extended_addr, key);
+	mutex_unlock(&sdata->sec_mtx);
+
+	return res;
+}
+#endif /* CONFIG_IEEE802154_NL802154_EXPERIMENTAL */
 
 static int
 ieee802154_ed_scan(struct wpan_phy *wpan_phy, struct wpan_dev *wpan_dev,
@@ -402,14 +585,6 @@ static inline bool is_short_address( u16 addr ) {
 #ifndef PRIx64
 #define PRIx64 "llx"
 #endif
-
-static unsigned int
-ieee802154_num_listeners( struct ieee802154_local *local ) {
-	unsigned int r;
-	r = 0;
-	r = NULL == local->disassoc_req_callback ? r : r + 1;
-	return r;
-}
 
 static int
 ieee802154_register_disassoc_req_listener( struct wpan_phy *wpan_phy,
@@ -548,6 +723,23 @@ const struct cfg802154_ops mac802154_config_ops = {
 	.set_max_csma_backoffs = ieee802154_set_max_csma_backoffs,
 	.set_max_frame_retries = ieee802154_set_max_frame_retries,
 	.set_lbt_mode = ieee802154_set_lbt_mode,
+	.set_ackreq_default = ieee802154_set_ackreq_default,
+#ifdef CONFIG_IEEE802154_NL802154_EXPERIMENTAL
+	.get_llsec_table = ieee802154_get_llsec_table,
+	.lock_llsec_table = ieee802154_lock_llsec_table,
+	.unlock_llsec_table = ieee802154_unlock_llsec_table,
+	/* TODO above */
+	.set_llsec_params = ieee802154_set_llsec_params,
+	.get_llsec_params = ieee802154_get_llsec_params,
+	.add_llsec_key = ieee802154_add_llsec_key,
+	.del_llsec_key = ieee802154_del_llsec_key,
+	.add_seclevel = ieee802154_add_seclevel,
+	.del_seclevel = ieee802154_del_seclevel,
+	.add_device = ieee802154_add_device,
+	.del_device = ieee802154_del_device,
+	.add_devkey = ieee802154_add_devkey,
+	.del_devkey = ieee802154_del_devkey,
+#endif /* CONFIG_IEEE802154_NL802154_EXPERIMENTAL */
 	.ed_scan = ieee802154_ed_scan,
 	.register_active_scan_listener = ieee802154_register_active_scan_listener,
 	.deregister_beacon_listener = ieee802154_deregister_beacon_listener,

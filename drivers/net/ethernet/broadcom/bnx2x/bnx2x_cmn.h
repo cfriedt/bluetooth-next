@@ -967,6 +967,8 @@ static inline int bnx2x_func_start(struct bnx2x *bp)
 	else /* CHIP_IS_E1X */
 		start_params->network_cos_mode = FW_WRR;
 
+	start_params->vxlan_dst_port = bp->vxlan_dst_port;
+
 	start_params->inner_rss = 1;
 
 	if (IS_MF_UFP(bp) && BNX2X_IS_MF_SD_PROTOCOL_FCOE(bp)) {
@@ -1066,6 +1068,15 @@ static inline void bnx2x_init_vlan_mac_fp_objs(struct bnx2x_fastpath *fp,
 			   BNX2X_FILTER_MAC_PENDING,
 			   &bp->sp_state, obj_type,
 			   &bp->macs_pool);
+
+	if (!CHIP_IS_E1x(bp))
+		bnx2x_init_vlan_obj(bp, &bnx2x_sp_obj(bp, fp).vlan_obj,
+				    fp->cl_id, fp->cid, BP_FUNC(bp),
+				    bnx2x_sp(bp, vlan_rdata),
+				    bnx2x_sp_mapping(bp, vlan_rdata),
+				    BNX2X_FILTER_VLAN_PENDING,
+				    &bp->sp_state, obj_type,
+				    &bp->vlans_pool);
 }
 
 /**
@@ -1125,7 +1136,7 @@ static inline void bnx2x_init_bp_objs(struct bnx2x *bp)
 	bnx2x_init_mac_credit_pool(bp, &bp->macs_pool, BP_FUNC(bp),
 				   bnx2x_get_path_func_num(bp));
 
-	bnx2x_init_vlan_credit_pool(bp, &bp->vlans_pool, BP_ABS_FUNC(bp)>>1,
+	bnx2x_init_vlan_credit_pool(bp, &bp->vlans_pool, BP_FUNC(bp),
 				    bnx2x_get_path_func_num(bp));
 
 	/* RSS configuration object */
@@ -1135,6 +1146,8 @@ static inline void bnx2x_init_bp_objs(struct bnx2x *bp)
 				  bnx2x_sp_mapping(bp, rss_rdata),
 				  BNX2X_FILTER_RSS_CONF_PENDING, &bp->sp_state,
 				  BNX2X_OBJ_TYPE_RX);
+
+	bp->vlan_credit = PF_VLAN_CREDIT_E2(bp, bnx2x_get_path_func_num(bp));
 }
 
 static inline u8 bnx2x_fp_qzone_id(struct bnx2x_fastpath *fp)
@@ -1375,4 +1388,16 @@ void bnx2x_schedule_sp_rtnl(struct bnx2x*, enum sp_rtnl_flag,
  * @state:	OS_DRIVER_STATE_* value reflecting current driver state
  */
 void bnx2x_set_os_driver_state(struct bnx2x *bp, u32 state);
+
+/**
+ * bnx2x_nvram_read - reads data from nvram [might sleep]
+ *
+ * @bp:		driver handle
+ * @offset:	byte offset in nvram
+ * @ret_buf:	pointer to buffer where data is to be stored
+ * @buf_size:   Length of 'ret_buf' in bytes
+ */
+int bnx2x_nvram_read(struct bnx2x *bp, u32 offset, u8 *ret_buf,
+		     int buf_size);
+
 #endif /* BNX2X_CMN_H */
