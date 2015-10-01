@@ -1059,7 +1059,7 @@ static void hci_cc_le_set_adv_enable(struct hci_dev *hdev, struct sk_buff *skb)
 
 		hci_dev_set_flag(hdev, HCI_LE_ADV);
 
-		conn = hci_conn_hash_lookup_state(hdev, LE_LINK, BT_CONNECT);
+		conn = hci_lookup_le_connect(hdev);
 		if (conn)
 			queue_delayed_work(hdev->workqueue,
 					   &conn->le_conn_timeout,
@@ -3726,17 +3726,25 @@ static void hci_sync_conn_complete_evt(struct hci_dev *hdev,
 		if (ev->link_type == ESCO_LINK)
 			goto unlock;
 
+		/* When the link type in the event indicates SCO connection
+		 * and lookup of the connection object fails, then check
+		 * if an eSCO connection object exists.
+		 *
+		 * The core limits the synchronous connections to either
+		 * SCO or eSCO. The eSCO connection is preferred and tried
+		 * to be setup first and until successfully established,
+		 * the link type will be hinted as eSCO.
+		 */
 		conn = hci_conn_hash_lookup_ba(hdev, ESCO_LINK, &ev->bdaddr);
 		if (!conn)
 			goto unlock;
-
-		conn->type = SCO_LINK;
 	}
 
 	switch (ev->status) {
 	case 0x00:
 		conn->handle = __le16_to_cpu(ev->handle);
 		conn->state  = BT_CONNECTED;
+		conn->type   = ev->link_type;
 
 		hci_debugfs_create_conn(conn);
 		hci_conn_add_sysfs(conn);
@@ -4447,7 +4455,7 @@ static void hci_le_conn_complete_evt(struct hci_dev *hdev, struct sk_buff *skb)
 	 */
 	hci_dev_clear_flag(hdev, HCI_LE_ADV);
 
-	conn = hci_conn_hash_lookup_state(hdev, LE_LINK, BT_CONNECT);
+	conn = hci_lookup_le_connect(hdev);
 	if (!conn) {
 		conn = hci_conn_add(hdev, LE_LINK, &ev->bdaddr, ev->role);
 		if (!conn) {
@@ -4640,42 +4648,49 @@ static struct hci_conn *check_pending_le_conn(struct hci_dev *hdev,
 	/* If we're not connectable only connect devices that we have in
 	 * our pend_le_conns list.
 	 */
-	params = hci_pend_le_action_lookup(&hdev->pend_le_conns,
-					   addr, addr_type);
+	params = hci_explicit_connect_lookup(hdev, addr, addr_type);
+
 	if (!params)
 		return NULL;
 
-	switch (params->auto_connect) {
-	case HCI_AUTO_CONN_DIRECT:
-		/* Only devices advertising with ADV_DIRECT_IND are
-		 * triggering a connection attempt. This is allowing
-		 * incoming connections from slave devices.
-		 */
-		if (adv_type != LE_ADV_DIRECT_IND)
+	if (!params->explicit_connect) {
+		switch (params->auto_connect) {
+		case HCI_AUTO_CONN_DIRECT:
+			/* Only devices advertising with ADV_DIRECT_IND are
+			 * triggering a connection attempt. This is allowing
+			 * incoming connections from slave devices.
+			 */
+			if (adv_type != LE_ADV_DIRECT_IND)
+				return NULL;
+			break;
+		case HCI_AUTO_CONN_ALWAYS:
+			/* Devices advertising with ADV_IND or ADV_DIRECT_IND
+			 * are triggering a connection attempt. This means
+			 * that incoming connectioms from slave device are
+			 * accepted and also outgoing connections to slave
+			 * devices are established when found.
+			 */
+			break;
+		default:
 			return NULL;
-		break;
-	case HCI_AUTO_CONN_ALWAYS:
-		/* Devices advertising with ADV_IND or ADV_DIRECT_IND
-		 * are triggering a connection attempt. This means
-		 * that incoming connectioms from slave device are
-		 * accepted and also outgoing connections to slave
-		 * devices are established when found.
-		 */
-		break;
-	default:
-		return NULL;
+		}
 	}
 
 	conn = hci_connect_le(hdev, addr, addr_type, BT_SECURITY_LOW,
 			      HCI_LE_AUTOCONN_TIMEOUT, HCI_ROLE_MASTER);
 	if (!IS_ERR(conn)) {
-		/* Store the pointer since we don't really have any
+		/* If HCI_AUTO_CONN_EXPLICIT is set, conn is already owned
+		 * by higher layer that tried to connect, if no then
+		 * store the pointer since we don't really have any
 		 * other owner of the object besides the params that
 		 * triggered it. This way we can abort the connection if
 		 * the parameters get removed and keep the reference
 		 * count consistent once the connection is established.
 		 */
-		params->conn = hci_conn_get(conn);
+
+		if (!params->explicit_connect)
+			params->conn = hci_conn_get(conn);
+
 		return conn;
 	}
 
@@ -4704,6 +4719,27 @@ static void process_adv_report(struct hci_dev *hdev, u8 type, bdaddr_t *bdaddr,
 	struct hci_conn *conn;
 	bool match;
 	u32 flags;
+	u8 *ptr, real_len;
+
+	/* Find the end of the data in case the report contains padded zero
+	 * bytes at the end causing an invalid length value.
+	 *
+	 * When data is NULL, len is 0 so there is no need for extra ptr
+	 * check as 'ptr < data + 0' is already false in such case.
+	 */
+	for (ptr = data; ptr < data + len && *ptr; ptr += *ptr + 1) {
+		if (ptr + 1 + *ptr > data + len)
+			break;
+	}
+
+	real_len = ptr - data;
+
+	/* Adjust for actual length */
+	if (len != real_len) {
+		BT_ERR_RATELIMITED("%s advertising data length corrected",
+				   hdev->name);
+		len = real_len;
+	}
 
 	/* If the direct address is present, then this report is from
 	 * a LE Direct Advertising Report event. In that case it is

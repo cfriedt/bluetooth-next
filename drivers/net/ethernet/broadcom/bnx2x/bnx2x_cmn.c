@@ -264,9 +264,9 @@ static u16 bnx2x_free_tx_pkt(struct bnx2x *bp, struct bnx2x_fp_txdata *txdata,
 	if (likely(skb)) {
 		(*pkts_compl)++;
 		(*bytes_compl) += skb->len;
+		dev_kfree_skb_any(skb);
 	}
 
-	dev_kfree_skb_any(skb);
 	tx_buf->first_bd = 0;
 	tx_buf->skb = NULL;
 
@@ -1190,7 +1190,7 @@ u16 bnx2x_get_mf_speed(struct bnx2x *bp)
 		/* Calculate the current MAX line speed limit for the MF
 		 * devices
 		 */
-		if (IS_MF_SI(bp))
+		if (IS_MF_PERCENT_BW(bp))
 			line_speed = (line_speed * maxCfg) / 100;
 		else { /* SD mode */
 			u16 vn_max_rate = maxCfg * 100;
@@ -2847,6 +2847,11 @@ int bnx2x_nic_load(struct bnx2x *bp, int load_mode)
 	bp->link_params.feature_config_flags &= ~FEATURE_CONFIG_BOOT_FROM_SAN;
 
 	/* Start fast path */
+
+	/* Re-configure vlan filters */
+	rc = bnx2x_vlan_reconfigure_vid(bp);
+	if (rc)
+		LOAD_ERROR_EXIT(bp, load_error3);
 
 	/* Initialize Rx filter. */
 	bnx2x_set_rx_mode_inner(bp);

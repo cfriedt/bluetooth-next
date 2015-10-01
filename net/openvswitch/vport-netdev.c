@@ -26,11 +26,10 @@
 #include <linux/rtnetlink.h>
 #include <linux/skbuff.h>
 #include <linux/openvswitch.h>
+#include <linux/export.h>
 
-#include <net/udp.h>
 #include <net/ip_tunnels.h>
 #include <net/rtnetlink.h>
-#include <net/vxlan.h>
 
 #include "datapath.h"
 #include "vport.h"
@@ -40,8 +39,11 @@
 static struct vport_ops ovs_netdev_vport_ops;
 
 /* Must be called with rcu_read_lock. */
-static void netdev_port_receive(struct vport *vport, struct sk_buff *skb)
+static void netdev_port_receive(struct sk_buff *skb)
 {
+	struct vport *vport;
+
+	vport = ovs_netdev_get_vport(skb->dev);
 	if (unlikely(!vport))
 		goto error;
 
@@ -57,10 +59,8 @@ static void netdev_port_receive(struct vport *vport, struct sk_buff *skb)
 
 	skb_push(skb, ETH_HLEN);
 	ovs_skb_postpush_rcsum(skb, skb->data, ETH_HLEN);
-
-	ovs_vport_receive(vport, skb, NULL);
+	ovs_vport_receive(vport, skb, skb_tunnel_info(skb));
 	return;
-
 error:
 	kfree_skb(skb);
 }
@@ -69,15 +69,11 @@ error:
 static rx_handler_result_t netdev_frame_hook(struct sk_buff **pskb)
 {
 	struct sk_buff *skb = *pskb;
-	struct vport *vport;
 
 	if (unlikely(skb->pkt_type == PACKET_LOOPBACK))
 		return RX_HANDLER_PASS;
 
-	vport = ovs_netdev_get_vport(skb->dev);
-
-	netdev_port_receive(vport, skb);
-
+	netdev_port_receive(skb);
 	return RX_HANDLER_CONSUMED;
 }
 
@@ -90,7 +86,7 @@ static struct net_device *get_dpdev(const struct datapath *dp)
 	return local->dev;
 }
 
-static struct vport *netdev_link(struct vport *vport, const char *name)
+struct vport *ovs_netdev_link(struct vport *vport, const char *name)
 {
 	int err;
 
@@ -135,6 +131,7 @@ error_free_vport:
 	ovs_vport_free(vport);
 	return ERR_PTR(err);
 }
+EXPORT_SYMBOL_GPL(ovs_netdev_link);
 
 static struct vport *netdev_create(const struct vport_parms *parms)
 {
@@ -144,10 +141,10 @@ static struct vport *netdev_create(const struct vport_parms *parms)
 	if (IS_ERR(vport))
 		return vport;
 
-	return netdev_link(vport, parms->name);
+	return ovs_netdev_link(vport, parms->name);
 }
 
-static void free_port_rcu(struct rcu_head *rcu)
+static void vport_netdev_free(struct rcu_head *rcu)
 {
 	struct vport *vport = container_of(rcu, struct vport, rcu);
 
@@ -165,6 +162,7 @@ void ovs_netdev_detach_dev(struct vport *vport)
 				netdev_master_upper_dev_get(vport->dev));
 	dev_set_promiscuity(vport->dev, -1);
 }
+EXPORT_SYMBOL_GPL(ovs_netdev_detach_dev);
 
 static void netdev_destroy(struct vport *vport)
 {
@@ -173,8 +171,24 @@ static void netdev_destroy(struct vport *vport)
 		ovs_netdev_detach_dev(vport);
 	rtnl_unlock();
 
-	call_rcu(&vport->rcu, free_port_rcu);
+	call_rcu(&vport->rcu, vport_netdev_free);
 }
+
+void ovs_netdev_tunnel_destroy(struct vport *vport)
+{
+	rtnl_lock();
+	if (vport->dev->priv_flags & IFF_OVS_DATAPATH)
+		ovs_netdev_detach_dev(vport);
+
+	/* Early release so we can unregister the device */
+	dev_put(vport->dev);
+	rtnl_delete_link(vport->dev);
+	vport->dev = NULL;
+	rtnl_unlock();
+
+	call_rcu(&vport->rcu, vport_netdev_free);
+}
+EXPORT_SYMBOL_GPL(ovs_netdev_tunnel_destroy);
 
 static unsigned int packet_length(const struct sk_buff *skb)
 {
@@ -186,28 +200,26 @@ static unsigned int packet_length(const struct sk_buff *skb)
 	return length;
 }
 
-static int netdev_send(struct vport *vport, struct sk_buff *skb)
+void ovs_netdev_send(struct vport *vport, struct sk_buff *skb)
 {
 	int mtu = vport->dev->mtu;
-	int len;
 
 	if (unlikely(packet_length(skb) > mtu && !skb_is_gso(skb))) {
 		net_warn_ratelimited("%s: dropped over-mtu packet: %d > %d\n",
 				     vport->dev->name,
 				     packet_length(skb), mtu);
+		vport->dev->stats.tx_errors++;
 		goto drop;
 	}
 
 	skb->dev = vport->dev;
-	len = skb->len;
 	dev_queue_xmit(skb);
-
-	return len;
+	return;
 
 drop:
 	kfree_skb(skb);
-	return 0;
 }
+EXPORT_SYMBOL_GPL(ovs_netdev_send);
 
 /* Returns null if this device is not attached to a datapath. */
 struct vport *ovs_netdev_get_vport(struct net_device *dev)
@@ -223,205 +235,15 @@ static struct vport_ops ovs_netdev_vport_ops = {
 	.type		= OVS_VPORT_TYPE_NETDEV,
 	.create		= netdev_create,
 	.destroy	= netdev_destroy,
-	.send		= netdev_send,
+	.send		= ovs_netdev_send,
 };
-
-/* Compat code for old userspace. */
-#if IS_ENABLED(CONFIG_VXLAN)
-static struct vport_ops ovs_vxlan_netdev_vport_ops;
-
-static int vxlan_get_options(const struct vport *vport, struct sk_buff *skb)
-{
-	struct vxlan_dev *vxlan = netdev_priv(vport->dev);
-	__be16 dst_port = vxlan->cfg.dst_port;
-
-	if (nla_put_u16(skb, OVS_TUNNEL_ATTR_DST_PORT, ntohs(dst_port)))
-		return -EMSGSIZE;
-
-	if (vxlan->flags & VXLAN_F_GBP) {
-		struct nlattr *exts;
-
-		exts = nla_nest_start(skb, OVS_TUNNEL_ATTR_EXTENSION);
-		if (!exts)
-			return -EMSGSIZE;
-
-		if (vxlan->flags & VXLAN_F_GBP &&
-		    nla_put_flag(skb, OVS_VXLAN_EXT_GBP))
-			return -EMSGSIZE;
-
-		nla_nest_end(skb, exts);
-	}
-
-	return 0;
-}
-
-static const struct nla_policy exts_policy[OVS_VXLAN_EXT_MAX + 1] = {
-	[OVS_VXLAN_EXT_GBP]	= { .type = NLA_FLAG, },
-};
-
-static int vxlan_configure_exts(struct vport *vport, struct nlattr *attr,
-				struct vxlan_config *conf)
-{
-	struct nlattr *exts[OVS_VXLAN_EXT_MAX + 1];
-	int err;
-
-	if (nla_len(attr) < sizeof(struct nlattr))
-		return -EINVAL;
-
-	err = nla_parse_nested(exts, OVS_VXLAN_EXT_MAX, attr, exts_policy);
-	if (err < 0)
-		return err;
-
-	if (exts[OVS_VXLAN_EXT_GBP])
-		conf->flags |= VXLAN_F_GBP;
-
-	return 0;
-}
-
-static struct vport *vxlan_tnl_create(const struct vport_parms *parms)
-{
-	struct net *net = ovs_dp_get_net(parms->dp);
-	struct nlattr *options = parms->options;
-	struct net_device *dev;
-	struct vport *vport;
-	struct nlattr *a;
-	int err;
-	struct vxlan_config conf = {
-		.no_share = true,
-		.flags = VXLAN_F_FLOW_BASED | VXLAN_F_COLLECT_METADATA,
-	};
-
-	if (!options) {
-		err = -EINVAL;
-		goto error;
-	}
-
-	a = nla_find_nested(options, OVS_TUNNEL_ATTR_DST_PORT);
-	if (a && nla_len(a) == sizeof(u16)) {
-		conf.dst_port = htons(nla_get_u16(a));
-	} else {
-		/* Require destination port from userspace. */
-		err = -EINVAL;
-		goto error;
-	}
-
-	vport = ovs_vport_alloc(0, &ovs_vxlan_netdev_vport_ops, parms);
-	if (IS_ERR(vport))
-		return vport;
-
-	a = nla_find_nested(options, OVS_TUNNEL_ATTR_EXTENSION);
-	if (a) {
-		err = vxlan_configure_exts(vport, a, &conf);
-		if (err) {
-			ovs_vport_free(vport);
-			goto error;
-		}
-	}
-
-	rtnl_lock();
-	dev = vxlan_dev_create(net, parms->name, NET_NAME_USER, &conf);
-	if (IS_ERR(dev)) {
-		rtnl_unlock();
-		ovs_vport_free(vport);
-		return ERR_CAST(dev);
-	}
-
-	dev_change_flags(dev, dev->flags | IFF_UP);
-	rtnl_unlock();
-	return vport;
-error:
-	return ERR_PTR(err);
-}
-
-static struct vport *vxlan_create(const struct vport_parms *parms)
-{
-	struct vport *vport;
-
-	vport = vxlan_tnl_create(parms);
-	if (IS_ERR(vport))
-		return vport;
-
-	return netdev_link(vport, parms->name);
-}
-
-static void vxlan_destroy(struct vport *vport)
-{
-	rtnl_lock();
-	if (vport->dev->priv_flags & IFF_OVS_DATAPATH)
-		ovs_netdev_detach_dev(vport);
-
-	/* Early release so we can unregister the device */
-	dev_put(vport->dev);
-	rtnl_delete_link(vport->dev);
-	vport->dev = NULL;
-	rtnl_unlock();
-
-	call_rcu(&vport->rcu, free_port_rcu);
-}
-
-static int vxlan_get_egress_tun_info(struct vport *vport, struct sk_buff *skb,
-				     struct ip_tunnel_info *egress_tun_info)
-{
-	struct vxlan_dev *vxlan = netdev_priv(vport->dev);
-	struct net *net = ovs_dp_get_net(vport->dp);
-	__be16 dst_port = vxlan_dev_dst_port(vxlan);
-	__be16 src_port;
-	int port_min;
-	int port_max;
-
-	inet_get_local_port_range(net, &port_min, &port_max);
-	src_port = udp_flow_src_port(net, skb, 0, 0, true);
-
-	return ovs_tunnel_get_egress_info(egress_tun_info, net,
-					  OVS_CB(skb)->egress_tun_info,
-					  IPPROTO_UDP, skb->mark,
-					  src_port, dst_port);
-}
-
-static struct vport_ops ovs_vxlan_netdev_vport_ops = {
-	.type		= OVS_VPORT_TYPE_VXLAN,
-	.create		= vxlan_create,
-	.destroy	= vxlan_destroy,
-	.get_options	= vxlan_get_options,
-	.send		= netdev_send,
-	.get_egress_tun_info	= vxlan_get_egress_tun_info,
-};
-
-static int vxlan_compat_init(void)
-{
-	return ovs_vport_ops_register(&ovs_vxlan_netdev_vport_ops);
-}
-
-static void vxlan_compat_exit(void)
-{
-	ovs_vport_ops_unregister(&ovs_vxlan_netdev_vport_ops);
-}
-#else
-static int vxlan_compat_init(void)
-{
-	return 0;
-}
-
-static void vxlan_compat_exit(void)
-{
-}
-#endif
 
 int __init ovs_netdev_init(void)
 {
-	int err;
-
-	err = ovs_vport_ops_register(&ovs_netdev_vport_ops);
-	if (err)
-		return err;
-	err = vxlan_compat_init();
-	if (err)
-		vxlan_compat_exit();
-	return err;
+	return ovs_vport_ops_register(&ovs_netdev_vport_ops);
 }
 
 void ovs_netdev_exit(void)
 {
 	ovs_vport_ops_unregister(&ovs_netdev_vport_ops);
-	vxlan_compat_exit();
 }
