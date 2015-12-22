@@ -101,13 +101,9 @@ static const struct net_device_ops lowpan_netdev_ops = {
 
 static void lowpan_setup(struct net_device *ldev)
 {
-	ldev->addr_len		= IEEE802154_ADDR_LEN;
 	memset(ldev->broadcast, 0xff, IEEE802154_ADDR_LEN);
-	ldev->type		= ARPHRD_6LOWPAN;
 	/* We need an ipv6hdr as minimum len when calling xmit */
 	ldev->hard_header_len	= sizeof(struct ipv6hdr);
-	ldev->mtu		= IPV6_MIN_MTU;
-	ldev->priv_flags	|= IFF_NO_QUEUE;
 	ldev->flags		= IFF_BROADCAST | IFF_MULTICAST;
 
 	ldev->netdev_ops	= &lowpan_netdev_ops;
@@ -165,9 +161,7 @@ static int lowpan_newlink(struct net *src_net, struct net_device *ldev,
 				wdev->needed_headroom;
 	ldev->needed_tailroom = wdev->needed_tailroom;
 
-	lowpan_netdev_setup(ldev, LOWPAN_LLTYPE_IEEE802154);
-
-	ret = register_netdevice(ldev);
+	ret = lowpan_register_netdevice(ldev, LOWPAN_LLTYPE_IEEE802154);
 	if (ret < 0) {
 		dev_put(wdev);
 		return ret;
@@ -184,7 +178,7 @@ static void lowpan_dellink(struct net_device *ldev, struct list_head *head)
 	ASSERT_RTNL();
 
 	wdev->ieee802154_ptr->lowpan_dev = NULL;
-	unregister_netdevice(ldev);
+	lowpan_unregister_netdevice(ldev);
 	dev_put(wdev);
 }
 

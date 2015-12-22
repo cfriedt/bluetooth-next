@@ -391,20 +391,16 @@ GLOBAL(stub_execveat)
 	jmp	return_from_execve
 END(stub_execveat)
 
-#if defined(CONFIG_X86_X32_ABI) || defined(CONFIG_IA32_EMULATION)
+#if defined(CONFIG_X86_X32_ABI)
 	.align	8
 GLOBAL(stub_x32_execve)
-GLOBAL(stub32_execve)
 	call	compat_sys_execve
 	jmp	return_from_execve
-END(stub32_execve)
 END(stub_x32_execve)
 	.align	8
 GLOBAL(stub_x32_execveat)
-GLOBAL(stub32_execveat)
 	call	compat_sys_execveat
 	jmp	return_from_execve
-END(stub32_execveat)
 END(stub_x32_execveat)
 #endif
 
@@ -513,6 +509,17 @@ END(irq_entries_start)
 	 * tracking that we're in kernel mode.
 	 */
 	SWAPGS
+
+	/*
+	 * We need to tell lockdep that IRQs are off.  We can't do this until
+	 * we fix gsbase, and we should do it before enter_from_user_mode
+	 * (which can take locks).  Since TRACE_IRQS_OFF idempotent,
+	 * the simplest way to handle it is to just call it twice if
+	 * we enter from user mode.  There's no reason to optimize this since
+	 * TRACE_IRQS_OFF is a no-op if lockdep is off.
+	 */
+	TRACE_IRQS_OFF
+
 #ifdef CONFIG_CONTEXT_TRACKING
 	call enter_from_user_mode
 #endif
@@ -557,7 +564,6 @@ ret_from_intr:
 	jz	retint_kernel
 
 	/* Interrupt came from user space */
-	LOCKDEP_SYS_EXIT_IRQ
 GLOBAL(retint_user)
 	mov	%rsp,%rdi
 	call	prepare_exit_to_usermode
@@ -587,7 +593,7 @@ retint_kernel:
  * At this label, code paths which return to kernel and to user,
  * which come from interrupts/exception and from syscalls, merge.
  */
-restore_regs_and_iret:
+GLOBAL(restore_regs_and_iret)
 	RESTORE_EXTRA_REGS
 restore_c_regs_and_iret:
 	RESTORE_C_REGS
@@ -1054,12 +1060,18 @@ ENTRY(error_entry)
 	SWAPGS
 
 .Lerror_entry_from_usermode_after_swapgs:
+	/*
+	 * We need to tell lockdep that IRQs are off.  We can't do this until
+	 * we fix gsbase, and we should do it before enter_from_user_mode
+	 * (which can take locks).
+	 */
+	TRACE_IRQS_OFF
 #ifdef CONFIG_CONTEXT_TRACKING
 	call enter_from_user_mode
 #endif
+	ret
 
 .Lerror_entry_done:
-
 	TRACE_IRQS_OFF
 	ret
 
@@ -1128,7 +1140,18 @@ END(error_exit)
 
 /* Runs on exception stack */
 ENTRY(nmi)
+	/*
+	 * Fix up the exception frame if we're on Xen.
+	 * PARAVIRT_ADJUST_EXCEPTION_FRAME is guaranteed to push at most
+	 * one value to the stack on native, so it may clobber the rdx
+	 * scratch slot, but it won't clobber any of the important
+	 * slots past it.
+	 *
+	 * Xen is a different story, because the Xen frame itself overlaps
+	 * the "NMI executing" variable.
+	 */
 	PARAVIRT_ADJUST_EXCEPTION_FRAME
+
 	/*
 	 * We allow breakpoints in NMIs. If a breakpoint occurs, then
 	 * the iretq it performs will take us out of NMI context.
@@ -1179,9 +1202,12 @@ ENTRY(nmi)
 	 * we don't want to enable interrupts, because then we'll end
 	 * up in an awkward situation in which IRQs are on but NMIs
 	 * are off.
+	 *
+	 * We also must not push anything to the stack before switching
+	 * stacks lest we corrupt the "NMI executing" variable.
 	 */
 
-	SWAPGS
+	SWAPGS_UNSAFE_STACK
 	cld
 	movq	%rsp, %rdx
 	movq	PER_CPU_VAR(cpu_current_top_of_stack), %rsp

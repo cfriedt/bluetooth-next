@@ -30,6 +30,8 @@ static int xfrm4_tunnel_check_size(struct sk_buff *skb)
 
 	mtu = dst_mtu(skb_dst(skb));
 	if (skb->len > mtu) {
+		skb->protocol = htons(ETH_P_IP);
+
 		if (skb->sk)
 			xfrm_local_error(skb, mtu);
 		else
@@ -87,17 +89,15 @@ static int __xfrm4_output(struct net *net, struct sock *sk, struct sk_buff *skb)
 #ifdef CONFIG_NETFILTER
 	if (!x) {
 		IPCB(skb)->flags |= IPSKB_REROUTED;
-		return dst_output(sk, skb);
+		return dst_output(net, sk, skb);
 	}
 #endif
 
 	return x->outer_mode->afinfo->output_finish(sk, skb);
 }
 
-int xfrm4_output(struct sock *sk, struct sk_buff *skb)
+int xfrm4_output(struct net *net, struct sock *sk, struct sk_buff *skb)
 {
-	struct net *net = dev_net(skb_dst(skb)->dev);
-
 	return NF_HOOK_COND(NFPROTO_IPV4, NF_INET_POST_ROUTING,
 			    net, sk, skb, NULL, skb_dst(skb)->dev,
 			    __xfrm4_output,

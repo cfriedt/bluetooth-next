@@ -433,20 +433,13 @@
 	mrs	x5, ifsr32_el2
 	stp	x4, x5, [x3]
 
-	skip_fpsimd_state x8, 3f
+	skip_fpsimd_state x8, 2f
 	mrs	x6, fpexc32_el2
 	str	x6, [x3, #16]
-3:
-	skip_debug_state x8, 2f
+2:
+	skip_debug_state x8, 1f
 	mrs	x7, dbgvcr32_el2
 	str	x7, [x3, #24]
-2:
-	skip_tee_state x8, 1f
-
-	add	x3, x2, #CPU_SYSREG_OFFSET(TEECR32_EL1)
-	mrs	x4, teecr32_el1
-	mrs	x5, teehbr32_el1
-	stp	x4, x5, [x3]
 1:
 .endm
 
@@ -466,16 +459,9 @@
 	msr	dacr32_el2, x4
 	msr	ifsr32_el2, x5
 
-	skip_debug_state x8, 2f
+	skip_debug_state x8, 1f
 	ldr	x7, [x3, #24]
 	msr	dbgvcr32_el2, x7
-2:
-	skip_tee_state x8, 1f
-
-	add	x3, x2, #CPU_SYSREG_OFFSET(TEECR32_EL1)
-	ldp	x4, x5, [x3]
-	msr	teecr32_el1, x4
-	msr	teehbr32_el1, x5
 1:
 .endm
 
@@ -570,8 +556,6 @@ alternative_endif
 	mrs	x3, cntv_ctl_el0
 	and	x3, x3, #3
 	str	w3, [x0, #VCPU_TIMER_CNTV_CTL]
-	bic	x3, x3, #1		// Clear Enable
-	msr	cntv_ctl_el0, x3
 
 	isb
 
@@ -579,6 +563,9 @@ alternative_endif
 	str	x3, [x0, #VCPU_TIMER_CNTV_CVAL]
 
 1:
+	// Disable the virtual timer
+	msr	cntv_ctl_el0, xzr
+
 	// Allow physical timer/counter access for the host
 	mrs	x2, cnthctl_el2
 	orr	x2, x2, #3
@@ -753,6 +740,9 @@ ENTRY(__kvm_vcpu_run)
 	// Guest context
 	add	x2, x0, #VCPU_CONTEXT
 
+	// We must restore the 32-bit state before the sysregs, thanks
+	// to Cortex-A57 erratum #852523.
+	restore_guest_32bit_state
 	bl __restore_sysregs
 
 	skip_debug_state x3, 1f
@@ -760,7 +750,6 @@ ENTRY(__kvm_vcpu_run)
 	kern_hyp_va x3
 	bl	__restore_debug
 1:
-	restore_guest_32bit_state
 	restore_guest_regs
 
 	// That's it, no more messing around.
@@ -875,6 +864,10 @@ ENTRY(__kvm_flush_vm_context)
 ENDPROC(__kvm_flush_vm_context)
 
 __kvm_hyp_panic:
+	// Stash PAR_EL1 before corrupting it in __restore_sysregs
+	mrs	x0, par_el1
+	push	x0, xzr
+
 	// Guess the context by looking at VTTBR:
 	// If zero, then we're already a host.
 	// Otherwise restore a minimal host context before panicing.
@@ -891,6 +884,14 @@ __kvm_hyp_panic:
 
 	bl __restore_sysregs
 
+	/*
+	 * Make sure we have a valid host stack, and don't leave junk in the
+	 * frame pointer that will give us a misleading host stack unwinding.
+	 */
+	ldr	x22, [x2, #CPU_GP_REG_OFFSET(CPU_SP_EL1)]
+	msr	sp_el1, x22
+	mov	x29, xzr
+
 1:	adr	x0, __hyp_panic_str
 	adr	x1, 2f
 	ldp	x2, x3, [x1]
@@ -901,7 +902,7 @@ __kvm_hyp_panic:
 	mrs	x3, esr_el2
 	mrs	x4, far_el2
 	mrs	x5, hpfar_el2
-	mrs	x6, par_el1
+	pop	x6, xzr		// active context PAR_EL1
 	mrs	x7, tpidr_el2
 
 	mov	lr, #(PSR_F_BIT | PSR_I_BIT | PSR_A_BIT | PSR_D_BIT |\
@@ -917,7 +918,7 @@ __kvm_hyp_panic:
 ENDPROC(__kvm_hyp_panic)
 
 __hyp_panic_str:
-	.ascii	"HYP panic:\nPS:%08x PC:%p ESR:%p\nFAR:%p HPFAR:%p PAR:%p\nVCPU:%p\n\0"
+	.ascii	"HYP panic:\nPS:%08x PC:%016x ESR:%08x\nFAR:%016x HPFAR:%016x PAR:%016x\nVCPU:%p\n\0"
 
 	.align	2
 
@@ -1018,9 +1019,15 @@ el1_trap:
 	b.ne	1f		// Not an abort we care about
 
 	/* This is an abort. Check for permission fault */
+alternative_if_not ARM64_WORKAROUND_834220
 	and	x2, x1, #ESR_ELx_FSC_TYPE
 	cmp	x2, #FSC_PERM
 	b.ne	1f		// Not a permission fault
+alternative_else
+	nop			// Use the permission fault path to
+	nop			// check for a valid S1 translation,
+	nop			// regardless of the ESR value.
+alternative_endif
 
 	/*
 	 * Check for Stage-1 page table walk, which is guaranteed

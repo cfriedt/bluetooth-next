@@ -639,7 +639,7 @@ static void pm8xxx_mpp_dbg_show(struct seq_file *s, struct gpio_chip *chip)
 }
 
 #else
-#define msm_mpp_dbg_show NULL
+#define pm8xxx_mpp_dbg_show NULL
 #endif
 
 static struct gpio_chip pm8xxx_mpp_template = {
@@ -763,7 +763,7 @@ static int pm8xxx_mpp_probe(struct platform_device *pdev)
 		return -ENOMEM;
 
 	pctrl->dev = &pdev->dev;
-	pctrl->npins = (unsigned)of_device_get_match_data(&pdev->dev);
+	pctrl->npins = (unsigned long)of_device_get_match_data(&pdev->dev);
 
 	pctrl->regmap = dev_get_regmap(pdev->dev.parent, NULL);
 	if (!pctrl->regmap) {
@@ -814,9 +814,9 @@ static int pm8xxx_mpp_probe(struct platform_device *pdev)
 #endif
 
 	pctrl->pctrl = pinctrl_register(&pctrl->desc, &pdev->dev, pctrl);
-	if (!pctrl->pctrl) {
+	if (IS_ERR(pctrl->pctrl)) {
 		dev_err(&pdev->dev, "couldn't register pm8xxx mpp driver\n");
-		return -ENODEV;
+		return PTR_ERR(pctrl->pctrl);
 	}
 
 	pctrl->chip = pm8xxx_mpp_template;

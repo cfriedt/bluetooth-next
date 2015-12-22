@@ -31,6 +31,7 @@
 #include <scsi/scsi_driver.h>
 #include <scsi/scsi_eh.h>
 #include <scsi/scsi_host.h>
+#include <scsi/scsi_dh.h>
 
 #include <trace/events/scsi.h>
 
@@ -221,13 +222,13 @@ int scsi_execute(struct scsi_device *sdev, const unsigned char *cmd,
 	int write = (data_direction == DMA_TO_DEVICE);
 	int ret = DRIVER_ERROR << 24;
 
-	req = blk_get_request(sdev->request_queue, write, __GFP_WAIT);
+	req = blk_get_request(sdev->request_queue, write, __GFP_RECLAIM);
 	if (IS_ERR(req))
 		return ret;
 	blk_rq_set_block_pc(req);
 
 	if (bufflen &&	blk_rq_map_kern(sdev->request_queue, req,
-					buffer, bufflen, __GFP_WAIT))
+					buffer, bufflen, __GFP_RECLAIM))
 		goto out;
 
 	req->cmd_len = COMMAND_SIZE(cmd[0]);
@@ -1248,9 +1249,8 @@ static int scsi_setup_fs_cmnd(struct scsi_device *sdev, struct request *req)
 {
 	struct scsi_cmnd *cmd = req->special;
 
-	if (unlikely(sdev->scsi_dh_data && sdev->scsi_dh_data->scsi_dh
-			 && sdev->scsi_dh_data->scsi_dh->prep_fn)) {
-		int ret = sdev->scsi_dh_data->scsi_dh->prep_fn(sdev, req);
+	if (unlikely(sdev->handler && sdev->handler->prep_fn)) {
+		int ret = sdev->handler->prep_fn(sdev, req);
 		if (ret != BLKPREP_OK)
 			return ret;
 	}
@@ -1957,7 +1957,7 @@ static int scsi_mq_prep_fn(struct request *req)
 static void scsi_mq_done(struct scsi_cmnd *cmd)
 {
 	trace_scsi_dispatch_cmd_done(cmd);
-	blk_mq_complete_request(cmd->request);
+	blk_mq_complete_request(cmd->request, cmd->request->errors);
 }
 
 static int scsi_queue_rq(struct blk_mq_hw_ctx *hctx,

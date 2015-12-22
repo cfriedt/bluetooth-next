@@ -3070,7 +3070,6 @@ static void fec_poll_controller(struct net_device *dev)
 }
 #endif
 
-#define FEATURES_NEED_QUIESCE NETIF_F_RXCSUM
 static inline void fec_enet_set_netdev_features(struct net_device *netdev,
 	netdev_features_t features)
 {
@@ -3094,7 +3093,7 @@ static int fec_set_features(struct net_device *netdev,
 	struct fec_enet_private *fep = netdev_priv(netdev);
 	netdev_features_t changed = features ^ netdev->features;
 
-	if (netif_running(netdev) && changed & FEATURES_NEED_QUIESCE) {
+	if (netif_running(netdev) && changed & NETIF_F_RXCSUM) {
 		napi_disable(&fep->napi);
 		netif_tx_lock_bh(netdev);
 		fec_stop(netdev);
@@ -3262,7 +3261,7 @@ static void fec_reset_phy(struct platform_device *pdev)
 		return;
 	}
 	msleep(msec);
-	gpio_set_value(phy_reset, 1);
+	gpio_set_value_cansleep(phy_reset, 1);
 }
 #else /* CONFIG_OF */
 static void fec_reset_phy(struct platform_device *pdev)
@@ -3278,7 +3277,6 @@ static void
 fec_enet_get_queue_num(struct platform_device *pdev, int *num_tx, int *num_rx)
 {
 	struct device_node *np = pdev->dev.of_node;
-	int err;
 
 	*num_tx = *num_rx = 1;
 
@@ -3286,13 +3284,9 @@ fec_enet_get_queue_num(struct platform_device *pdev, int *num_tx, int *num_rx)
 		return;
 
 	/* parse the num of tx and rx queues */
-	err = of_property_read_u32(np, "fsl,num-tx-queues", num_tx);
-	if (err)
-		*num_tx = 1;
+	of_property_read_u32(np, "fsl,num-tx-queues", num_tx);
 
-	err = of_property_read_u32(np, "fsl,num-rx-queues", num_rx);
-	if (err)
-		*num_rx = 1;
+	of_property_read_u32(np, "fsl,num-rx-queues", num_rx);
 
 	if (*num_tx < 1 || *num_tx > FEC_ENET_MAX_TX_QS) {
 		dev_warn(&pdev->dev, "Invalid num_tx(=%d), fall back to 1\n",

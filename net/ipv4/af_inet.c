@@ -119,7 +119,7 @@
 #ifdef CONFIG_IP_MROUTE
 #include <linux/mroute.h>
 #endif
-#include <net/vrf.h>
+#include <net/l3mdev.h>
 
 
 /* The inetsw table contains everything that inet_create needs to
@@ -219,17 +219,13 @@ int inet_listen(struct socket *sock, int backlog)
 		 * shutdown() (rather than close()).
 		 */
 		if ((sysctl_tcp_fastopen & TFO_SERVER_ENABLE) != 0 &&
-		    !inet_csk(sk)->icsk_accept_queue.fastopenq) {
+		    !inet_csk(sk)->icsk_accept_queue.fastopenq.max_qlen) {
 			if ((sysctl_tcp_fastopen & TFO_SERVER_WO_SOCKOPT1) != 0)
-				err = fastopen_init_queue(sk, backlog);
+				fastopen_queue_tune(sk, backlog);
 			else if ((sysctl_tcp_fastopen &
 				  TFO_SERVER_WO_SOCKOPT2) != 0)
-				err = fastopen_init_queue(sk,
+				fastopen_queue_tune(sk,
 				    ((uint)sysctl_tcp_fastopen) >> 16);
-			else
-				err = 0;
-			if (err)
-				goto out;
 
 			tcp_fastopen_init_key_once(true);
 		}
@@ -260,6 +256,9 @@ static int inet_create(struct net *net, struct socket *sock, int protocol,
 	unsigned char answer_flags;
 	int try_loading_module = 0;
 	int err;
+
+	if (protocol < 0 || protocol >= IPPROTO_MAX)
+		return -EINVAL;
 
 	sock->state = SS_UNCONNECTED;
 
@@ -450,7 +449,7 @@ int inet_bind(struct socket *sock, struct sockaddr *uaddr, int addr_len)
 			goto out;
 	}
 
-	tb_id = vrf_dev_table_ifindex(net, sk->sk_bound_dev_if) ? : tb_id;
+	tb_id = l3mdev_fib_table_by_index(net, sk->sk_bound_dev_if) ? : tb_id;
 	chk_addr_ret = inet_addr_type_table(net, addr->sin_addr.s_addr, tb_id);
 
 	/* Not specified by any standard per-se, however it breaks too
