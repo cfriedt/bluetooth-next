@@ -160,6 +160,30 @@ int mlx5_query_hca_caps(struct mlx5_core_dev *dev)
 		if (err)
 			return err;
 	}
+
+	if (MLX5_CAP_GEN(dev, vport_group_manager) &&
+	    MLX5_CAP_GEN(dev, eswitch_flow_table)) {
+		err = mlx5_core_get_caps(dev, MLX5_CAP_ESWITCH_FLOW_TABLE,
+					 HCA_CAP_OPMOD_GET_CUR);
+		if (err)
+			return err;
+		err = mlx5_core_get_caps(dev, MLX5_CAP_ESWITCH_FLOW_TABLE,
+					 HCA_CAP_OPMOD_GET_MAX);
+		if (err)
+			return err;
+	}
+
+	if (MLX5_CAP_GEN(dev, eswitch_flow_table)) {
+		err = mlx5_core_get_caps(dev, MLX5_CAP_ESWITCH,
+					 HCA_CAP_OPMOD_GET_CUR);
+		if (err)
+			return err;
+		err = mlx5_core_get_caps(dev, MLX5_CAP_ESWITCH,
+					 HCA_CAP_OPMOD_GET_MAX);
+		if (err)
+			return err;
+	}
+
 	return 0;
 }
 
@@ -200,25 +224,3 @@ int mlx5_cmd_teardown_hca(struct mlx5_core_dev *dev)
 
 	return err;
 }
-
-int mlx5_core_query_special_context(struct mlx5_core_dev *dev, u32 *rsvd_lkey)
-{
-	struct mlx5_cmd_query_special_contexts_mbox_in in;
-	struct mlx5_cmd_query_special_contexts_mbox_out out;
-	int err;
-
-	memset(&in, 0, sizeof(in));
-	memset(&out, 0, sizeof(out));
-	in.hdr.opcode = cpu_to_be16(MLX5_CMD_OP_QUERY_SPECIAL_CONTEXTS);
-	err = mlx5_cmd_exec(dev, &in, sizeof(in), &out, sizeof(out));
-	if (err)
-		return err;
-
-	if (out.hdr.status)
-		err = mlx5_cmd_status_to_err(&out.hdr);
-
-	*rsvd_lkey = be32_to_cpu(out.resd_lkey);
-
-	return err;
-}
-EXPORT_SYMBOL(mlx5_core_query_special_context);

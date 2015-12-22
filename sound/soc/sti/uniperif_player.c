@@ -669,6 +669,7 @@ static int uni_player_startup(struct snd_pcm_substream *substream,
 {
 	struct sti_uniperiph_data *priv = snd_soc_dai_get_drvdata(dai);
 	struct uniperif *player = priv->dai_data.uni;
+	player->substream = substream;
 
 	player->clk_adj = 0;
 
@@ -950,6 +951,8 @@ static void uni_player_shutdown(struct snd_pcm_substream *substream,
 	if (player->state != UNIPERIF_STATE_STOPPED)
 		/* Stop the player */
 		uni_player_stop(player);
+
+	player->substream = NULL;
 }
 
 static int uni_player_parse_dt_clk_glue(struct platform_device *pdev,
@@ -989,8 +992,8 @@ static int uni_player_parse_dt(struct platform_device *pdev,
 	if (!info)
 		return -ENOMEM;
 
-	of_property_read_u32(pnode, "version", &player->ver);
-	if (player->ver == SND_ST_UNIPERIF_VERSION_UNKNOWN) {
+	if (of_property_read_u32(pnode, "st,version", &player->ver) ||
+	    player->ver == SND_ST_UNIPERIF_VERSION_UNKNOWN) {
 		dev_err(dev, "Unknown uniperipheral version ");
 		return -EINVAL;
 	}
@@ -998,10 +1001,16 @@ static int uni_player_parse_dt(struct platform_device *pdev,
 	if (player->ver >= SND_ST_UNIPERIF_VERSION_UNI_PLR_TOP_1_0)
 		info->underflow_enabled = 1;
 
-	of_property_read_u32(pnode, "uniperiph-id", &info->id);
+	if (of_property_read_u32(pnode, "st,uniperiph-id", &info->id)) {
+		dev_err(dev, "uniperipheral id not defined");
+		return -EINVAL;
+	}
 
 	/* Read the device mode property */
-	of_property_read_string(pnode, "mode", &mode);
+	if (of_property_read_string(pnode, "st,mode", &mode)) {
+		dev_err(dev, "uniperipheral mode not defined");
+		return -EINVAL;
+	}
 
 	if (strcasecmp(mode, "hdmi") == 0)
 		info->player_type = SND_ST_UNIPERIF_PLAYER_TYPE_HDMI;

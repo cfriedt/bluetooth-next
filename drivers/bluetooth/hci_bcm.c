@@ -41,6 +41,9 @@
 #include "btbcm.h"
 #include "hci_uart.h"
 
+#define BCM_LM_DIAG_PKT 0x07
+#define BCM_LM_DIAG_SIZE 63
+
 #define BCM_AUTOSUSPEND_DELAY	5000 /* default autosleep delay */
 
 struct bcm_device {
@@ -246,6 +249,29 @@ static inline int bcm_request_irq(struct bcm_data *bcm) { return 0; }
 static inline int bcm_setup_sleep(struct hci_uart *hu) { return 0; }
 #endif
 
+static int bcm_set_diag(struct hci_dev *hdev, bool enable)
+{
+	struct hci_uart *hu = hci_get_drvdata(hdev);
+	struct bcm_data *bcm = hu->priv;
+	struct sk_buff *skb;
+
+	if (!test_bit(HCI_RUNNING, &hdev->flags))
+		return -ENETDOWN;
+
+	skb = bt_skb_alloc(3, GFP_KERNEL);
+	if (!skb)
+		return -ENOMEM;
+
+	*skb_put(skb, 1) = BCM_LM_DIAG_PKT;
+	*skb_put(skb, 1) = 0xf0;
+	*skb_put(skb, 1) = enable;
+
+	skb_queue_tail(&bcm->txq, skb);
+	hci_uart_tx_wakeup(hu);
+
+	return 0;
+}
+
 static int bcm_open(struct hci_uart *hu)
 {
 	struct bcm_data *bcm;
@@ -339,6 +365,7 @@ static int bcm_setup(struct hci_uart *hu)
 
 	bt_dev_dbg(hu->hdev, "hu %p", hu);
 
+	hu->hdev->set_diag = bcm_set_diag;
 	hu->hdev->set_bdaddr = btbcm_set_bdaddr;
 
 	err = btbcm_initialize(hu->hdev, fw_name, sizeof(fw_name));
@@ -396,10 +423,18 @@ finalize:
 	return err;
 }
 
+#define BCM_RECV_LM_DIAG \
+	.type = BCM_LM_DIAG_PKT, \
+	.hlen = BCM_LM_DIAG_SIZE, \
+	.loff = 0, \
+	.lsize = 0, \
+	.maxlen = BCM_LM_DIAG_SIZE
+
 static const struct h4_recv_pkt bcm_recv_pkts[] = {
-	{ H4_RECV_ACL,   .recv = hci_recv_frame },
-	{ H4_RECV_SCO,   .recv = hci_recv_frame },
-	{ H4_RECV_EVENT, .recv = hci_recv_frame },
+	{ H4_RECV_ACL,      .recv = hci_recv_frame },
+	{ H4_RECV_SCO,      .recv = hci_recv_frame },
+	{ H4_RECV_EVENT,    .recv = hci_recv_frame },
+	{ BCM_RECV_LM_DIAG, .recv = hci_recv_diag  },
 };
 
 static int bcm_recv(struct hci_uart *hu, const void *data, int count)
@@ -437,7 +472,7 @@ static int bcm_enqueue(struct hci_uart *hu, struct sk_buff *skb)
 	bt_dev_dbg(hu->hdev, "hu %p skb %p", hu, skb);
 
 	/* Prepend skb with frame type */
-	memcpy(skb_push(skb, 1), &bt_cb(skb)->pkt_type, 1);
+	memcpy(skb_push(skb, 1), &hci_skb_pkt_type(skb), 1);
 	skb_queue_tail(&bcm->txq, skb);
 
 	return 0;
@@ -764,6 +799,7 @@ static int bcm_remove(struct platform_device *pdev)
 static const struct hci_uart_proto bcm_proto = {
 	.id		= HCI_UART_BCM,
 	.name		= "BCM",
+	.manufacturer	= 15,
 	.init_speed	= 115200,
 	.oper_speed	= 4000000,
 	.open		= bcm_open,
@@ -779,6 +815,7 @@ static const struct hci_uart_proto bcm_proto = {
 #ifdef CONFIG_ACPI
 static const struct acpi_device_id bcm_acpi_match[] = {
 	{ "BCM2E39", 0 },
+	{ "BCM2E65", 0 },
 	{ "BCM2E67", 0 },
 	{ },
 };

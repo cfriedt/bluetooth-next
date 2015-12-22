@@ -873,10 +873,8 @@ int mlx4_en_process_rx_cq(struct net_device *dev, struct mlx4_en_cq *cq, int bud
 		 * - TCP/IP (v4)
 		 * - without IP options
 		 * - not an IP fragment
-		 * - no LLS polling in progress
 		 */
-		if (!mlx4_en_cq_busy_polling(cq) &&
-		    (dev->features & NETIF_F_GRO)) {
+		if (dev->features & NETIF_F_GRO) {
 			struct sk_buff *gro_skb = napi_get_frags(&cq->napi);
 			if (!gro_skb)
 				goto next;
@@ -927,7 +925,6 @@ int mlx4_en_process_rx_cq(struct net_device *dev, struct mlx4_en_cq *cq, int bud
 						PKT_HASH_TYPE_L3);
 
 			skb_record_rx_queue(gro_skb, cq->ring);
-			skb_mark_napi_id(gro_skb, &cq->napi);
 
 			if (ring->hwtstamp_rx_filter == HWTSTAMP_FILTER_ALL) {
 				timestamp = mlx4_en_get_cqe_ts(cqe);
@@ -990,13 +987,7 @@ int mlx4_en_process_rx_cq(struct net_device *dev, struct mlx4_en_cq *cq, int bud
 					       timestamp);
 		}
 
-		skb_mark_napi_id(skb, &cq->napi);
-
-		if (!mlx4_en_cq_busy_polling(cq))
-			napi_gro_receive(&cq->napi, skb);
-		else
-			netif_receive_skb(skb);
-
+		napi_gro_receive(&cq->napi, skb);
 next:
 		for (nr = 0; nr < priv->num_frags; nr++)
 			mlx4_en_free_frag(priv, frags, nr);
@@ -1038,22 +1029,19 @@ int mlx4_en_poll_rx_cq(struct napi_struct *napi, int budget)
 	struct mlx4_en_priv *priv = netdev_priv(dev);
 	int done;
 
-	if (!mlx4_en_cq_lock_napi(cq))
-		return budget;
-
 	done = mlx4_en_process_rx_cq(dev, cq, budget);
-
-	mlx4_en_cq_unlock_napi(cq);
 
 	/* If we used up all the quota - we're probably not done yet... */
 	if (done == budget) {
-		int cpu_curr;
 		const struct cpumask *aff;
+		struct irq_data *idata;
+		int cpu_curr;
 
 		INC_PERF_COUNTER(priv->pstats.napi_quota);
 
 		cpu_curr = smp_processor_id();
-		aff = irq_desc_get_irq_data(cq->irq_desc)->affinity;
+		idata = irq_desc_get_irq_data(cq->irq_desc);
+		aff = irq_data_get_affinity_mask(idata);
 
 		if (likely(cpumask_test_cpu(cpu_curr, aff)))
 			return budget;
@@ -1268,8 +1256,6 @@ int mlx4_en_config_rss_steer(struct mlx4_en_priv *priv)
 		rss_context->hash_fn = MLX4_RSS_HASH_TOP;
 		memcpy(rss_context->rss_key, priv->rss_key,
 		       MLX4_EN_RSS_KEY_SIZE);
-		netdev_rss_key_fill(rss_context->rss_key,
-				    MLX4_EN_RSS_KEY_SIZE);
 	} else {
 		en_err(priv, "Unknown RSS hash function requested\n");
 		err = -EINVAL;
